@@ -81,6 +81,8 @@ function readOptions() {
     maxLightVertices: maxVertices,
     rrStart: Number($('rrStart').value),
     mis: $('mis').value,
+    connectionMode: $('connectionMode').value,
+    connectionBudget: Number($('connectionBudget').value),
   };
 }
 
@@ -93,6 +95,32 @@ function syncControlLabels() {
   $('exposureValue').textContent = Number($('exposure').value).toFixed(2);
   $('maxVerticesValue').textContent = $('maxVertices').value;
   $('rrStartValue').textContent = $('rrStart').value;
+  $('connectionBudgetValue').textContent = $('connectionBudget').value;
+  const budgetEnabled = $('connectionMode').value === 'optimized';
+  $('connectionBudget').disabled = !budgetEnabled;
+}
+
+function renderConnectionCost() {
+  const panel = $('connectionCost');
+  const body = $('connectionCostBody');
+  const r = state.renderer;
+  if (!r || r.options.connectionMode === 'baseline') {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const cb = r.costBreakdown();
+  const p = cb.perPixel;
+  body.textContent = [
+    `模式: ${cb.mode}`,
+    `候选/像素: ${p.candidates.toFixed(2)}`,
+    `可见性光线/像素: ${p.visibilityRays.toFixed(2)}（占候选 ${(cb.traceFraction * 100).toFixed(1)}%）`,
+    `界面硬剪枝/像素: ${p.interfacePruned.toFixed(2)}`,
+    `事件/零几何/相机软拒绝/像素: ${p.eventPruned.toFixed(2)} / ${p.geometryPruned.toFixed(2)} / ${p.cameraRejected.toFixed(2)}`,
+    `预算递延/像素: ${p.budgetDeferred.toFixed(2)}`,
+    `归还预算/像素: ${p.budgetRefunded.toFixed(2)}`,
+    `已发射光线阻断率: ${(cb.blockedRayRate * 100).toFixed(1)}%`,
+  ].join('\n');
 }
 
 function loadSceneControls(id) {
@@ -164,6 +192,7 @@ async function startRender() {
   drawMain();
   renderStrategyGrid();
   drawConvergence();
+  renderConnectionCost();
   if (result.stopped) {
     setKernelState('idle', '渲染已停止');
     $('renderStatus').textContent = `已停止，保留 ${state.renderer.samples} SPP 累积`;
@@ -455,7 +484,10 @@ function inspectPixel() {
   const statusCounts = new Map();
   for (const a of state.inspect.attempts) statusCounts.set(a.status, (statusCounts.get(a.status) || 0) + 1);
   const summary = [...statusCounts.entries()].map(([k, v]) => `${k}×${v}`).join('，');
-  $('inspectStatus').textContent = `相机路径 ${state.inspect.cam.vertices.length} 顶点（${state.inspect.cam.termination}）；灯光路径 ${state.inspect.light.vertices.length} 顶点（${state.inspect.light.termination}）。${accepted.length} 个加权接受连接。内核状态：${summary}`;
+  const costText = state.inspect.cost
+    ? ` 连接规划：候选 ${state.inspect.cost.candidates}，硬剪枝 ${state.inspect.cost.hardPruned}，可见性光线 ${state.inspect.cost.visibilityRays}，归还预算 ${state.inspect.cost.budgetRefunded}。`
+    : '';
+  $('inspectStatus').textContent = `相机路径 ${state.inspect.cam.vertices.length} 顶点（${state.inspect.cam.termination}）；灯光路径 ${state.inspect.light.vertices.length} 顶点（${state.inspect.light.termination}）。${accepted.length} 个加权接受连接。${costText} 内核状态：${summary}`;
   renderAttemptList();
   renderDetail();
   drawTopView();
@@ -509,7 +541,7 @@ function renderDetail() {
     </div>
     <h2>完整路径顶点与正反密度</h2>
     <table>
-      <thead><tr><th>#</th><th>端点/材质</th><th>p</th><th>BSDF pdf 正/反 W</th><th>面积 pdf 正/反</th><th>RR</th></tr></thead>
+      <thead><tr><th>#</th><th>端点/材质</th><th>介质侧</th><th>p</th><th>BSDF pdf 正/反 W</th><th>面积 pdf 正/反</th><th>RR</th></tr></thead>
       <tbody>${a.full.map((v, i) => vertexRow(v, i)).join('')}</tbody>
     </table>
     <h2>同一光路的可行拆分 / MIS 候选</h2>
@@ -542,6 +574,7 @@ function vertexRow(v, i) {
     : '—';
   return `<tr>
     <td>${i}</td><td><code>${role}</code><br>${v.materialId || v.cameraId || ''}</td>
+    <td><code>side ${v.mediumSide ?? 0}</code></td>
     <td><code>${vec(v.p, 2)}</code></td>
     <td>${forwardW}</td><td>${forwardA}</td><td>${rrText}</td>
   </tr>`;
@@ -719,6 +752,19 @@ function wireEvents() {
   $('mis').addEventListener('change', () => {
     startRender();
     inspectPixel();
+  });
+  $('connectionMode').addEventListener('change', () => {
+    syncControlLabels();
+    startRender();
+    inspectPixel();
+  });
+  $('connectionBudget').addEventListener('input', () => {
+    syncControlLabels();
+    clearTimeout(state.cameraTimer);
+    state.cameraTimer = setTimeout(() => {
+      startRender();
+      inspectPixel();
+    }, 220);
   });
   $('sceneSelect').addEventListener('change', (e) => {
     loadSceneControls(e.target.value);

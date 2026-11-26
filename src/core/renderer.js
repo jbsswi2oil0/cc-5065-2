@@ -2,6 +2,22 @@ import { Rng, hashSeed } from './rng.js';
 import { Camera } from './camera.js';
 import { generateCameraPath, generateLightPath } from './pathgen.js';
 import { evaluateAllStrategies } from './bdpt.js';
+import { evaluateAllStrategiesPlanned } from './connect.js';
+
+function makeCostAccumulator() {
+  return {
+    pixelSamples: 0,
+    candidates: 0,
+    eventPruned: 0,
+    geometryPruned: 0,
+    interfacePruned: 0,
+    cameraRejected: 0,
+    budgetPruned: 0,
+    visibilityRays: 0,
+    visibilityBlocked: 0,
+    budgetRefunded: 0,
+  };
+}
 
 export class BdptRenderer {
   constructor(scene, cameraParams, width, height, options = {}) {
@@ -10,7 +26,15 @@ export class BdptRenderer {
     this.height = height;
     this.cameraParams = cameraParams;
     this.camera = this.makeCamera();
-    this.options = { maxCameraVertices: 6, maxLightVertices: 6, rrStart: 2, mis: 'power', ...options };
+    this.options = {
+      maxCameraVertices: 6,
+      maxLightVertices: 6,
+      rrStart: 2,
+      mis: 'power',
+      connectionMode: 'baseline',
+      connectionBudget: Infinity,
+      ...options,
+    };
     this.beauty = new Float64Array(width * height * 3);
     this.strategies = new Map();
     this.samples = 0;
@@ -18,6 +42,7 @@ export class BdptRenderer {
     this.statusCounts = new Map();
     this.sampleLuminance = [];
     this.stopRequested = false;
+    this.connectionCost = makeCostAccumulator();
   }
 
   requestStop() {
@@ -47,6 +72,7 @@ export class BdptRenderer {
     this.statusCounts.clear();
     this.sampleLuminance = [];
     this.stopRequested = false;
+    this.connectionCost = makeCostAccumulator();
   }
 
   strategyBuffer(key, s, t) {
@@ -63,7 +89,19 @@ export class BdptRenderer {
     const rng = new Rng(seed);
     const cam = generateCameraPath(this.scene, this.camera, px, py, rng, this.options);
     const light = generateLightPath(this.scene, rng, this.options);
-    const attempts = evaluateAllStrategies(this.scene, this.camera, cam, light, this.options);
+    let attempts;
+    if (this.options.connectionMode === 'baseline') {
+      attempts = evaluateAllStrategies(this.scene, this.camera, cam, light, this.options);
+      this.accumulateBaselineCost(cam, light, attempts);
+    } else {
+      const budgetRng = new Rng(hashSeed(seed, 'connection-budget'));
+      const planned = evaluateAllStrategiesPlanned(this.scene, this.camera, cam, light, {
+        ...this.options,
+        connectionRng: budgetRng,
+      });
+      attempts = planned.attempts;
+      this.accumulateCost(planned.cost);
+    }
     const sum = [0, 0, 0];
     const idx = (py * this.width + px) * 3;
     for (const a of attempts) {
@@ -84,6 +122,56 @@ export class BdptRenderer {
     this.beauty[idx + 1] += sum[1];
     this.beauty[idx + 2] += sum[2];
     return { cam, light, attempts, sum };
+  }
+
+  accumulateCost(cost) {
+    const c = this.connectionCost;
+    c.pixelSamples++;
+    c.candidates += cost.candidates;
+    c.eventPruned += cost.eventRejected;
+    c.geometryPruned += cost.geometryZeroProbes;
+    c.interfacePruned += cost.interfacePruned;
+    c.cameraRejected += cost.cameraRejected;
+    c.budgetPruned += cost.budgetDeferred;
+    c.visibilityRays += cost.visibilityRays;
+    c.visibilityBlocked += cost.visibilityBlocked;
+    c.budgetRefunded += cost.budgetRefunded;
+  }
+
+  // 基线模式下没有规划器，直接从尝试结果统计真实可见性工作量，作为对照基准。
+  accumulateBaselineCost(cam, light, attempts) {
+    const c = this.connectionCost;
+    c.pixelSamples++;
+    c.candidates += cam.vertices.length * light.vertices.length;
+    for (const a of attempts) {
+      if (a.t === 0) continue;
+      if (a.visible !== null) c.visibilityRays++;
+      if (a.visible === false) c.visibilityBlocked++;
+    }
+  }
+
+  costBreakdown() {
+    const c = this.connectionCost;
+    const n = Math.max(1, c.pixelSamples);
+    const traced = Math.max(1, c.visibilityRays);
+    return {
+      mode: this.options.connectionMode,
+      pixelSamples: c.pixelSamples,
+      perPixel: {
+        candidates: c.candidates / n,
+        visibilityRays: c.visibilityRays / n,
+        eventPruned: c.eventPruned / n,
+        geometryPruned: c.geometryPruned / n,
+        interfacePruned: c.interfacePruned / n,
+        cameraRejected: c.cameraRejected / n,
+        budgetDeferred: c.budgetPruned / n,
+        budgetRefunded: c.budgetRefunded / n,
+      },
+      totals: { ...c },
+      blockedRayRate: c.visibilityBlocked / traced,
+      traceFraction: c.visibilityRays / Math.max(1, c.candidates),
+      pruneRate: (c.eventPruned + c.geometryPruned + c.cameraRejected) / Math.max(1, c.candidates),
+    };
   }
 
   renderSynchronously(spp = 1) {
@@ -186,9 +274,22 @@ function toneMapChannel(x) {
 export function inspectPath(scene, cameraParams, width, height, px, py, seed = 1, options = {}) {
   const camera = new Camera({ width, height, ...cameraParams });
   const rng = new Rng(seed);
-  const opts = { maxCameraVertices: 6, maxLightVertices: 6, rrStart: 2, ...options };
+  const opts = { maxCameraVertices: 6, maxLightVertices: 6, rrStart: 2, connectionMode: 'baseline', ...options };
   const cam = generateCameraPath(scene, camera, px, py, rng, opts);
   const light = generateLightPath(scene, rng, opts);
-  const attempts = evaluateAllStrategies(scene, camera, cam, light, opts);
-  return { camera, cam, light, attempts };
+  let attempts;
+  let cost = null;
+  let reports = null;
+  if (opts.connectionMode === 'baseline') {
+    attempts = evaluateAllStrategies(scene, camera, cam, light, opts);
+  } else {
+    const planned = evaluateAllStrategiesPlanned(scene, camera, cam, light, {
+      ...opts,
+      connectionRng: new Rng(hashSeed(seed, 'inspect-budget')),
+    });
+    attempts = planned.attempts;
+    cost = planned.cost;
+    reports = planned.reports;
+  }
+  return { camera, cam, light, attempts, cost, reports, connectionMode: opts.connectionMode };
 }

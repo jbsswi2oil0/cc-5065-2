@@ -9,6 +9,7 @@ import {
   isDeltaMaterial,
   emissionPdfW,
 } from './materials.js';
+import { mediumSideAt } from './connect.js';
 
 function clone3(x) {
   return [x[0], x[1], x[2]];
@@ -57,6 +58,7 @@ function makeSurfaceVertex(hit, prev, edgeInfo, alpha) {
     edge: edgeInfo,
     rr: null,
     densityRecord: null,
+    mediumSide: prev.mediumSide ?? 0,
   };
 }
 
@@ -166,6 +168,10 @@ function traceExtension(scene, rng, path, options) {
   traceExtension(scene, rng, path, options);
 }
 
+function annotateMediumSides(scene, path) {
+  for (const v of path.vertices) v.mediumSide = mediumSideAt(scene, v.p);
+}
+
 export function generateCameraPath(scene, camera, px, py, rng, options = {}) {
   const ray = camera.rayForPixel(px, py, rng);
   const path = {
@@ -184,12 +190,14 @@ export function generateCameraPath(scene, camera, px, py, rng, options = {}) {
     cameraId: 'pinhole',
     pixel: [px, py],
     alpha: [1, 1, 1],
+    mediumSide: mediumSideAt(scene, camera.eye),
     rr: { depth: 0, applicable: false, q: 1, reason: 'camera-endpoint' },
   });
   const hit = intersectScene(scene, ray);
   if (!hit) {
     path.termination = 'camera-miss';
     updateDensityRecords(path);
+    annotateMediumSides(scene, path);
     return path;
   }
   const r = V.dist(camera.eye, hit.p);
@@ -213,6 +221,7 @@ export function generateCameraPath(scene, camera, px, py, rng, options = {}) {
   path.length = path.vertices.length;
   traceExtension(scene, rng, path, options);
   updateDensityRecords(path);
+  annotateMediumSides(scene, path);
   return path;
 }
 
@@ -237,6 +246,7 @@ export function generateLightPath(scene, rng, options = {}) {
     pdfPointA: emitter.pdfA,
     chooseP: emitter.chooseP,
     alpha: V.div(le, emitter.pdfA),
+    mediumSide: mediumSideAt(scene, emitter.p),
     rr: { depth: 0, applicable: false, q: 1, reason: 'emitter-endpoint' },
   });
 
@@ -246,12 +256,14 @@ export function generateLightPath(scene, rng, options = {}) {
   const pdfW = emissionPdfW(emitter.material, emitter.n, wi);
   if (pdfW <= 0) {
     path.termination = 'emission-direction-zero';
+    annotateMediumSides(scene, path);
     return path;
   }
   const origin = V.add(emitter.p, V.mul(emitter.n, 1.2e-4));
   const hit = intersectScene(scene, makeRay(origin, wi));
   if (!hit) {
     path.termination = 'light-miss';
+    annotateMediumSides(scene, path);
     return path;
   }
   const d = safeUnit(emitter.p, hit.p);
@@ -277,5 +289,6 @@ export function generateLightPath(scene, rng, options = {}) {
   path.length = path.vertices.length;
   traceExtension(scene, rng, path, options);
   updateDensityRecords(path);
+  annotateMediumSides(scene, path);
   return path;
 }

@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/*.test.js",
-    "check": "node scripts/numeric-check.js"
+    "check": "node scripts/numeric-check.js",
+    "bench:connect": "node scripts/bench-connect.mjs",
+    "stat:connect": "node scripts/stat-compare.mjs"
   },
   "engines": {
     "node": ">=20"

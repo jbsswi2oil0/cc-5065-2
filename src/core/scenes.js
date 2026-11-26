@@ -84,6 +84,24 @@ function slitScene() {
     description: '厚墙片段留出 30cm 窄缝；大量相机—灯光连接会因开口边界或可见性失败。',
     prims,
     materials,
+    mediumRegions: [
+      {
+        id: 'slit-interface',
+        plane: { p0: [0, 0, wallZ], n: [0, 0, -1] },
+        positiveMask: 1,
+        openings: [
+          {
+            id: 'slit-opening',
+            center: [0, (y0 + y1) / 2, wallZ],
+            u: [1, 0, 0],
+            v: [0, 1, 0],
+            halfU: (x1 - x0) / 2,
+            halfV: (y1 - y0) / 2,
+          },
+        ],
+        swapped: false,
+      },
+    ],
     lightPrimIds: prims.filter((p) => p.materialId.startsWith('light')).map((p) => p.id),
     camera: { target: [0, 1.62, 0.05], yaw: 0, pitch: 0.035, distance: 5.65, fov: 46 },
     topView: { centerZ: 0.1, span: 7.0 },
@@ -113,16 +131,84 @@ function occlusionScene() {
   };
 }
 
+function interfaceScene() {
+  // 实体隔断墙把房间分成两个介质侧，墙上只有一个小开口
+  // （y∈[1.05,2.45], x∈[-0.18,0.18]）。介质界面与实体墙共面：连接段若在开口
+  // 外穿越界面，必然击中实体墙（可见性光线也会失败），因此界面剪枝是可证明的
+  // 几何上界，不会丢弃任何基线本会接受的贡献。交换介质只翻转侧标签，不动几何。
+  const planeZ = 0.15;
+  const halfU = 0.18;
+  const y0 = 1.05;
+  const y1 = 2.45;
+  const opening = {
+    id: 'iface-opening',
+    center: [0, (y0 + y1) / 2, planeZ],
+    u: [1, 0, 0],
+    v: [0, 1, 0],
+    halfU,
+    halfV: (y1 - y0) / 2,
+  };
+  const mediumRegions = [
+    {
+      id: 'transparent-interface',
+      plane: { p0: [0, 0, planeZ], n: [0, 0, -1] },
+      positiveMask: 1,
+      openings: [opening],
+      swapped: false,
+    },
+  ];
+  const prims = [
+    ...roomShell('iface', 'dark'),
+    rect('iface-wall-left', [(-3 - halfU) / 2, 1.7, planeZ], [1, 0, 0], [0, 1, 0], 3 - halfU, 3.4, 'dark'),
+    rect('iface-wall-right', [(3 + halfU) / 2, 1.7, planeZ], [1, 0, 0], [0, 1, 0], 3 - halfU, 3.4, 'dark'),
+    rect('iface-wall-bottom', [0, y0 / 2, planeZ], [1, 0, 0], [0, 1, 0], halfU * 2, y0, 'dark'),
+    rect('iface-wall-top', [0, (y1 + 3.4) / 2, planeZ], [1, 0, 0], [0, 1, 0], halfU * 2, 3.4 - y1, 'dark'),
+    rect('iface-light-warm', [-1.6, 3.385, -1.55], [1, 0, 0], [0, 0, 1], 1.35, 0.8, 'lightWarm'),
+    rect('iface-light-cool', [1.95, 2.5, -2.94], [1, 0, 0], [0, 1, 0], 0.8, 1.05, 'lightCool'),
+    sph('iface-back-rough', [-1.55, 0.6, -1.45], 0.6, 'tealRough'),
+    sph('iface-back-diffuse', [1.55, 0.72, -1.05], 0.72, 'ochreRough'),
+    sph('iface-front-mirror', [-1.95, 0.55, 1.75], 0.55, 'mirror'),
+    rect('iface-front-rough', [1.7, 1.3, -2.92], [1, 0, 0], [0, 1, 0], 1.15, 1.6, 'plumRough'),
+  ];
+  return {
+    id: 'interface',
+    label: '透明界面窄开口（介质交换核查）',
+    description: '虚拟界面分隔两种介质侧，连接段只有穿过小开口才可通行；交换界面两侧介质后重新分配预算，稀有有效路径仍须保留且只计一次。',
+    prims,
+    materials,
+    mediumRegions,
+    lightPrimIds: prims.filter((p) => p.materialId.startsWith('light')).map((p) => p.id),
+    camera: { target: [0, 1.6, -0.2], yaw: 0, pitch: 0.04, distance: 5.55, fov: 46 },
+    topView: { centerZ: 0.15, span: 7.0 },
+  };
+}
+
 export const SCENES = {
   corner: cornerScene,
   slit: slitScene,
   occlusion: occlusionScene,
+  interface: interfaceScene,
 };
 
 export function createScene(id) {
   const factory = SCENES[id] || cornerScene;
   const scene = factory();
   scene.emitters = scene.prims.filter((p) => scene.lightPrimIds.includes(p.id));
+  return scene;
+}
+
+// 交换透明界面两侧的介质标签：不改动任何 BSDF 与几何，只翻转平面法线朝向与
+// 正侧掩码，便于做“同一光路、介质侧互换”的不重复计数核查。
+export function swapInterfaceMedia(scene) {
+  if (!scene.mediumRegions) return scene;
+  for (const region of scene.mediumRegions) {
+    region.plane = { p0: region.plane.p0, n: [-region.plane.n[0], -region.plane.n[1], -region.plane.n[2]] };
+    region.positiveMask = region.positiveMask === 1 ? 2 : 1;
+    region.swapped = !region.swapped;
+  }
+  for (const prim of scene.prims) {
+    if (prim.mediumSide !== undefined) prim.mediumSide = undefined;
+  }
   return scene;
 }
 
