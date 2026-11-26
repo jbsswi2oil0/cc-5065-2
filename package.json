@@ -1,0 +1,15 @@
+{
+  "name": "bdpt-light-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive bidirectional path tracing laboratory",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "check": "node scripts/numeric-check.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

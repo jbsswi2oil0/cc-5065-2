@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BDPT Light Lab · 双向路径追踪光照实验窗口</title>
+  <link rel="stylesheet" href="/src/ui/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>BDPT Light Lab</h1>
+      <p>相机子路径 × 发光面子路径 · 真实端点连接 / 几何项 / 可见性 / 正反密度 / MIS 加权</p>
+    </div>
+    <div class="kernel-state" id="kernelState" data-state="idle">内核就绪</div>
+  </header>
+
+  <main class="layout">
+    <aside class="controls">
+      <section>
+        <h2>实验场景</h2>
+        <select id="sceneSelect">
+          <option value="corner">拐角间接照明 + 镜面链</option>
+          <option value="slit">狭窄开口</option>
+          <option value="occlusion">遮挡连接核查</option>
+        </select>
+        <p class="hint" id="sceneDescription"></p>
+      </section>
+
+      <section>
+        <h2>相机</h2>
+        <label>水平环绕 yaw <output id="yawValue"></output>
+          <input id="yaw" type="range" min="-1.15" max="1.15" step="0.01" />
+        </label>
+        <label>俯仰 pitch <output id="pitchValue"></output>
+          <input id="pitch" type="range" min="-0.12" max="0.42" step="0.01" />
+        </label>
+        <label>距离 <output id="distanceValue"></output>
+          <input id="distance" type="range" min="4.2" max="9" step="0.05" />
+        </label>
+        <label>目标高度 <output id="targetYValue"></output>
+          <input id="targetY" type="range" min="0.45" max="2.35" step="0.05" />
+        </label>
+        <label>视野 <output id="fovValue"></output>
+          <input id="fov" type="range" min="38" max="68" step="1" />
+        </label>
+        <label>曝光 <output id="exposureValue"></output>
+          <input id="exposure" type="range" min="0.35" max="5" step="0.05" value="2.4" />
+        </label>
+      </section>
+
+      <section>
+        <h2>BDPT 内核</h2>
+        <label>内部分辨率
+          <select id="resolution">
+            <option value="72x45">72 × 45（快）</option>
+            <option value="96x60" selected>96 × 60（实验）</option>
+            <option value="128x80">128 × 80（细查）</option>
+          </select>
+        </label>
+        <label>目标 SPP
+          <select id="targetSpp">
+            <option value="8">8</option>
+            <option value="16" selected>16</option>
+            <option value="32">32</option>
+            <option value="64">64</option>
+          </select>
+        </label>
+        <label>最大顶点数（含端点） <output id="maxVerticesValue"></output>
+          <input id="maxVertices" type="range" min="3" max="8" step="1" value="6" />
+        </label>
+        <label>RR 起始反弹深度 <output id="rrStartValue"></output>
+          <input id="rrStart" type="range" min="1" max="4" step="1" value="2" />
+        </label>
+        <label>MIS 启发式
+          <select id="mis">
+            <option value="power" selected>Power heuristic β=2</option>
+            <option value="balance">Balance heuristic</option>
+          </select>
+        </label>
+        <div class="button-row">
+          <button id="restartRender" class="primary">重新累积</button>
+          <button id="stopRender">停止</button>
+        </div>
+        <div class="progress"><div id="renderProgress"></div></div>
+        <p class="status-line" id="renderStatus">尚未渲染</p>
+      </section>
+
+      <section>
+        <h2>单向 PT 参照</h2>
+        <label>参照 SPP
+          <select id="referenceSpp">
+            <option value="16">16</option>
+            <option value="32" selected>32</option>
+            <option value="64">64</option>
+          </select>
+        </label>
+        <button id="runReference" class="wide">运行高样本参照与误差对照</button>
+        <p class="status-line" id="referenceStatus">参照未运行</p>
+      </section>
+
+      <section>
+        <h2>完整加权数值验证</h2>
+        <button id="runValidation" class="wide">运行 MIS / 密度 / 可见性 / 亮度验证</button>
+        <pre id="validationOutput" class="validation-output">尚未运行。该检查会枚举同一完整路径的所有可行拆分，核查 Σw=1、正反密度和场景亮度。</pre>
+      </section>
+    </aside>
+
+    <section class="center">
+      <div class="toolbar">
+        <div class="segmented" id="viewMode">
+          <button data-view="beauty" class="active">Beauty 全图</button>
+          <button data-view="indirect">仅间接</button>
+          <button data-view="direct">仅直接</button>
+          <button data-view="reference">PT 参照</button>
+          <button data-view="difference">差异 ×4</button>
+        </div>
+        <span id="imageMeta" class="image-meta"></span>
+      </div>
+
+      <div class="canvas-frame main-frame">
+        <canvas id="renderCanvas" width="960" height="600"></canvas>
+        <div class="canvas-hint">点击画面选择检查像素</div>
+      </div>
+
+      <div class="metrics" id="metricsGrid">
+        <div><span>BDPT 平均亮度</span><strong id="metricBdpt">—</strong></div>
+        <div><span>PT 平均亮度</span><strong id="metricPt">—</strong></div>
+        <div><span>亮度比 BDPT/PT</span><strong id="metricRatio">—</strong></div>
+        <div><span>相对 RMSE</span><strong id="metricRmse">—</strong></div>
+        <div><span>当前 SPP</span><strong id="metricSpp">0</strong></div>
+        <div><span>接受连接记录</span><strong id="metricAccepted">0</strong></div>
+      </div>
+
+      <div class="panel convergence-panel">
+        <div class="panel-title-row">
+          <h2>亮度收敛曲线</h2>
+          <span class="hint-inline">实线 BDPT · 虚线/橙线 PT 参照</span>
+        </div>
+        <canvas id="convergenceCanvas" width="900" height="180"></canvas>
+      </div>
+
+      <div class="panel strategy-panel">
+        <div class="panel-title-row">
+          <h2>策略贡献分图 (s,t)</h2>
+          <span class="hint-inline">s 含相机端点，t 含发光端点；所有分图共享同一组 MIS 权重，不重复累加光路</span>
+        </div>
+        <div id="strategyGrid" class="strategy-grid"></div>
+        <div id="strategySummary" class="strategy-summary"></div>
+      </div>
+    </section>
+
+    <aside class="inspector">
+      <section>
+        <h2>选定路径核查</h2>
+        <div class="pixel-row">
+          <label>x <input id="pixelX" type="number" min="0" value="48" /></label>
+          <label>y <input id="pixelY" type="number" min="0" value="30" /></label>
+          <label>seed <input id="pathSeed" type="number" value="20261126" /></label>
+        </div>
+        <button id="inspectPath" class="primary wide">生成并连接该像素的子路径</button>
+        <p class="status-line" id="inspectStatus">等待内核生成路径。</p>
+      </section>
+
+      <section>
+        <h2>顶视连接图</h2>
+        <canvas id="topCanvas" width="420" height="360"></canvas>
+        <div class="legend">
+          <span><i class="dot cam"></i>相机子路径</span>
+          <span><i class="dot light"></i>灯光子路径</span>
+          <span><i class="line connect"></i>选中连接</span>
+          <span><i class="line blocked"></i>遮挡</span>
+        </div>
+      </section>
+
+      <section class="attempts-section">
+        <h2>内核策略尝试</h2>
+        <div id="attemptList" class="attempt-list">尚未生成尝试。</div>
+      </section>
+
+      <section>
+        <h2>顶点密度 / RR / MIS</h2>
+        <div id="detailPanel" class="detail-panel">选择一次策略尝试后显示完整路径记录。</div>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="/src/ui/app.js"></script>
+</body>
+</html>
